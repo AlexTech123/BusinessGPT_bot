@@ -1,0 +1,4 @@
+aiohttp
+aiogram==3.*
+Flask[async]==2.3.*
+gunicorn
