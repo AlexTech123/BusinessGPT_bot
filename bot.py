@@ -27,10 +27,11 @@ USER_MAPPING = {
     1035739386: "Вован Крюк",
     407221863: "Некит Русанов",
     1878550901: "Егориус",
+    924097351: "Александр Блок",
 }
 
 PERSONA_NAMES = list(USER_MAPPING.values())
-BOT_USERNAME = "businessgpt_text_bot"
+BOT_USERNAME = "business_textbot"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
