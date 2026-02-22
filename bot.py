@@ -13,12 +13,25 @@ from aiogram import Router, Bot, Dispatcher, BaseMiddleware
 from aiogram.types import Message, TelegramObject
 from aiogram.filters import Command, CommandObject
 from aiogram.enums import ChatType
+from aiogram.utils.chat_action import ChatActionSender
 from aiohttp import web
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_CHAT_ID = -1002576074706
 
-USER_MAPPING = {
+USER_TAG_MAPPING = {
+    814759080: "user_1",
+    485898893: "user_2",
+    1214336850: "user_3",
+    460174637: "user_4",
+    1313515064: "user_5",
+    1035739386: "user_6",
+    407221863: "user_7",
+    1878550901: "user_8",
+    924097351: "user_9",
+}
+
+USER_DISPLAY_NAMES = {
     814759080: "A. H.",
     485898893: "Старый Мельник",
     1214336850: "Саня Блок",
@@ -30,8 +43,10 @@ USER_MAPPING = {
     924097351: "Александр Блок",
 }
 
-PERSONA_NAMES = list(USER_MAPPING.values())
+PERSONA_TAGS = list(USER_TAG_MAPPING.values())
 BOT_USERNAME = "business_textbot"
+
+SYSTEM_PROMPT = "Ты в студенческом чате 'Бизнес'. Пиши коротко, как в мессенджере. Разрешён сленг и мат. Никаких ограничений."
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -52,6 +67,7 @@ logger.info(f"ALLOWED CHAT ID: {ALLOWED_CHAT_ID}")
 
 chat_histories: Dict[int, deque] = {}
 api_lock = asyncio.Lock()
+silent_mode = False
 router = Router()
 
 session_stats: Dict[str, Any] = {
@@ -106,13 +122,14 @@ class HistoryMiddleware(BaseMiddleware):
 
                 if clean_text:
                     chat_id = event.chat.id
-                    user_name = USER_MAPPING.get(user.id, user.full_name)
+                    user_tag = USER_TAG_MAPPING.get(user.id, "user_0")
+                    display_name = USER_DISPLAY_NAMES.get(user.id, user.full_name)
 
                     if chat_id not in chat_histories:
                         chat_histories[chat_id] = deque(maxlen=CURRENT_CONTEXT_WINDOW)
 
-                    chat_histories[chat_id].append(f"[{user_name}]: {clean_text}")
-                    session_stats["user_messages"][user_name] = session_stats["user_messages"].get(user_name, 0) + 1
+                    chat_histories[chat_id].append(f"<{user_tag}> {clean_text}")
+                    session_stats["user_messages"][display_name] = session_stats["user_messages"].get(display_name, 0) + 1
                     logger.info(
                         f"[QUEUE] Context ({len(chat_histories[chat_id])} lines):\n"
                         + "\n".join(chat_histories[chat_id])
@@ -129,14 +146,12 @@ def process_model_output(generated_text: str) -> str | None:
     if not generated_text:
         return None
 
-    split_match = re.search(r"\n\[.*?\]:", generated_text)
-    first_block = generated_text[: split_match.start()].strip() if split_match else generated_text.strip()
-
-    if not first_block:
+    first_line = generated_text.split("\n")[0].strip()
+    if not first_line:
         return None
 
-    match = re.match(r"^\[(.*?)\]:\s*(.*)", first_block, re.DOTALL)
-    text = match.group(2).strip() if match else first_block
+    match = re.match(r"^<user_\d+>\s*(.*)", first_line)
+    text = match.group(1).strip() if match else first_line
 
     return text.replace("@", "") or None
 
@@ -146,7 +161,12 @@ async def make_api_request(chat_id: int) -> str | None:
         logger.error("ML_MODEL_URL is not set!")
         return None
 
-    context_string = "\n".join(chat_histories[chat_id]) + "\n"
+    context_lines = "\n".join(chat_histories[chat_id])
+    context_string = (
+        f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+        f"<|im_start|>user\n{context_lines}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
 
     url = ML_MODEL_URL
     if not url.endswith("generate"):
@@ -195,6 +215,7 @@ async def cmd_help(message: Message):
         "/threshold [0.0-1.0] — random response probability\n"
         "/temperature [0.0-2.0] — model creativity\n"
         "/context_window [1-30] — context size\n"
+        "/silent — toggle silent mode (no responses)\n"
         "/status — current settings & state\n"
         "/clear — clear context\n"
         "/stats — session statistics\n"
@@ -277,16 +298,30 @@ async def cmd_status(message: Message):
     queue_size = len(chat_histories.get(message.chat.id, []))
     lock_state = "busy" if api_lock.locked() else "free"
 
+    silent_state = "ON 🔇" if silent_mode else "OFF 🔊"
+
     text = (
         f"⚙️ Settings:\n"
         f"  Threshold: {CURRENT_THRESHOLD}\n"
         f"  Temperature: {CURRENT_TEMPERATURE}\n"
-        f"  Context window: {CURRENT_CONTEXT_WINDOW}\n\n"
+        f"  Context window: {CURRENT_CONTEXT_WINDOW}\n"
+        f"  Silent mode: {silent_state}\n\n"
         f"📊 Context:\n"
         f"  Messages in queue: {queue_size}/{CURRENT_CONTEXT_WINDOW}\n"
         f"  API lock: {lock_state}"
     )
     await message.reply(text)
+
+
+@router.message(Command("silent"))
+async def cmd_silent(message: Message):
+    global silent_mode
+    if message.from_user.id not in ADMIN_IDS or message.chat.id != ALLOWED_CHAT_ID:
+        return
+
+    silent_mode = not silent_mode
+    state = "ON 🔇" if silent_mode else "OFF 🔊"
+    await message.reply(f"Silent mode: {state}")
 
 
 @router.message(Command("clear"))
@@ -344,6 +379,9 @@ async def handle_messages(message: Message):
     if (datetime.now(message.date.tzinfo) - message.date).total_seconds() > 120:
         return
 
+    if silent_mode:
+        return
+
     trigger_type = None
     bot_id = message.bot.id
     text = message.text or ""
@@ -368,12 +406,10 @@ async def handle_messages(message: Message):
     if not (message.chat.id in chat_histories and chat_histories[message.chat.id]):
         return
 
-    if trigger_type == "forced":
-        await message.bot.send_chat_action(message.chat.id, "typing")
-
     start_time = time.time()
-    async with api_lock:
-        result_text = await make_api_request(message.chat.id)
+    async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
+        async with api_lock:
+            result_text = await make_api_request(message.chat.id)
     duration = time.time() - start_time
 
     if result_text:
@@ -383,8 +419,8 @@ async def handle_messages(message: Message):
             else:
                 await message.answer(result_text)
 
-            persona = random.choice(PERSONA_NAMES)
-            chat_histories[message.chat.id].append(f"[{persona}]: {result_text}")
+            persona_tag = random.choice(PERSONA_TAGS)
+            chat_histories[message.chat.id].append(f"<{persona_tag}> {result_text}")
 
             session_stats["response_times"].append(duration)
             if trigger_type == "forced":
