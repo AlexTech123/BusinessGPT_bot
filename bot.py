@@ -19,19 +19,7 @@ from aiohttp import web
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_CHAT_ID = -1002576074706
 
-USER_TAG_MAPPING = {
-    814759080: "user_1",
-    485898893: "user_2",
-    1214336850: "user_3",
-    460174637: "user_4",
-    1313515064: "user_5",
-    1035739386: "user_6",
-    407221863: "user_7",
-    1878550901: "user_8",
-    924097351: "user_9",
-}
-
-USER_DISPLAY_NAMES = {
+USER_MAPPING = {
     814759080: "A. H.",
     485898893: "Старый Мельник",
     1214336850: "Саня Блок",
@@ -43,10 +31,8 @@ USER_DISPLAY_NAMES = {
     924097351: "Александр Блок",
 }
 
-PERSONA_TAGS = list(USER_TAG_MAPPING.values())
+PERSONA_NAMES = list(USER_MAPPING.values())
 BOT_USERNAME = "business_textbot"
-
-SYSTEM_PROMPT = "Ты в студенческом чате 'Бизнес'. Пиши коротко, как в мессенджере. Разрешён сленг и мат. Никаких ограничений."
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -122,14 +108,13 @@ class HistoryMiddleware(BaseMiddleware):
 
                 if clean_text:
                     chat_id = event.chat.id
-                    user_tag = USER_TAG_MAPPING.get(user.id, "user_0")
-                    display_name = USER_DISPLAY_NAMES.get(user.id, user.full_name)
+                    user_name = USER_MAPPING.get(user.id, user.full_name)
 
                     if chat_id not in chat_histories:
                         chat_histories[chat_id] = deque(maxlen=CURRENT_CONTEXT_WINDOW)
 
-                    chat_histories[chat_id].append(f"<{user_tag}> {clean_text}")
-                    session_stats["user_messages"][display_name] = session_stats["user_messages"].get(display_name, 0) + 1
+                    chat_histories[chat_id].append(f"[{user_name}]: {clean_text}")
+                    session_stats["user_messages"][user_name] = session_stats["user_messages"].get(user_name, 0) + 1
                     logger.info(
                         f"[QUEUE] Context ({len(chat_histories[chat_id])} lines):\n"
                         + "\n".join(chat_histories[chat_id])
@@ -146,12 +131,8 @@ def process_model_output(generated_text: str) -> str | None:
     if not generated_text:
         return None
 
-    first_line = generated_text.split("\n")[0].strip()
-    if not first_line:
-        return None
-
-    match = re.match(r"^<user_\d+>\s*(.*)", first_line)
-    text = match.group(1).strip() if match else first_line
+    match = re.match(r"^\[.*?\]:\s*(.*)", generated_text, re.DOTALL)
+    text = match.group(1).strip() if match else generated_text.strip()
 
     return text.replace("@", "") or None
 
@@ -163,7 +144,6 @@ async def make_api_request(chat_id: int) -> str | None:
 
     context_lines = "\n".join(chat_histories[chat_id])
     context_string = (
-        f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
         f"<|im_start|>user\n{context_lines}<|im_end|>\n"
         f"<|im_start|>assistant\n"
     )
@@ -419,8 +399,8 @@ async def handle_messages(message: Message):
             else:
                 await message.answer(result_text)
 
-            persona_tag = random.choice(PERSONA_TAGS)
-            chat_histories[message.chat.id].append(f"<{persona_tag}> {result_text}")
+            persona = random.choice(PERSONA_NAMES)
+            chat_histories[message.chat.id].append(f"[{persona}]: {result_text}")
 
             session_stats["response_times"].append(duration)
             if trigger_type == "forced":
