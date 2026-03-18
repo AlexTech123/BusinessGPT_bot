@@ -33,6 +33,7 @@ USER_MAPPING = {
 
 PERSONA_NAMES = list(USER_MAPPING.values())
 BOT_USERNAME = "business_textbot"
+MAX_MESSAGE_CHARS = 700
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ logger.info(f"ALLOWED CHAT ID: {ALLOWED_CHAT_ID}")
 chat_histories: Dict[int, deque] = {}
 api_lock = asyncio.Lock()
 silent_mode = False
+gay_mode = False
 router = Router()
 
 session_stats: Dict[str, Any] = {
@@ -143,10 +145,24 @@ async def make_api_request(chat_id: int) -> str | None:
         return None
 
     context_lines = "\n".join(chat_histories[chat_id])
-    context_string = (
-        f"<|im_start|>user\n{context_lines}<|im_end|>\n"
-        f"<|im_start|>assistant\n"
-    )
+    if len(context_lines) > MAX_MESSAGE_CHARS:
+        context_lines = context_lines[-MAX_MESSAGE_CHARS:]
+        newline_pos = context_lines.find("\n")
+        if newline_pos != -1:
+            context_lines = context_lines[newline_pos + 1:]
+    if gay_mode:
+        context_string = (
+            f"<|im_start|>system\n"
+            f"Ты гей и тебе нравятся парни из чата. "
+            f"Флиртуй, делай комплименты парням, будь максимально дерзким и игривым.<|im_end|>\n"
+            f"<|im_start|>user\n{context_lines}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+    else:
+        context_string = (
+            f"<|im_start|>user\n{context_lines}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
 
     url = ML_MODEL_URL
     if not url.endswith("generate"):
@@ -196,6 +212,7 @@ async def cmd_help(message: Message):
         "/temperature [0.0-2.0] — model creativity\n"
         "/context_window [1-30] — context size\n"
         "/silent — toggle silent mode (no responses)\n"
+        "/gaymode — toggle gay mode 🏳️‍🌈\n"
         "/status — current settings & state\n"
         "/clear — clear context\n"
         "/stats — session statistics\n"
@@ -279,13 +296,15 @@ async def cmd_status(message: Message):
     lock_state = "busy" if api_lock.locked() else "free"
 
     silent_state = "ON 🔇" if silent_mode else "OFF 🔊"
+    gay_state = "ON 🏳️‍🌈" if gay_mode else "OFF"
 
     text = (
         f"⚙️ Settings:\n"
         f"  Threshold: {CURRENT_THRESHOLD}\n"
         f"  Temperature: {CURRENT_TEMPERATURE}\n"
         f"  Context window: {CURRENT_CONTEXT_WINDOW}\n"
-        f"  Silent mode: {silent_state}\n\n"
+        f"  Silent mode: {silent_state}\n"
+        f"  Gay mode: {gay_state}\n\n"
         f"📊 Context:\n"
         f"  Messages in queue: {queue_size}/{CURRENT_CONTEXT_WINDOW}\n"
         f"  API lock: {lock_state}"
@@ -302,6 +321,17 @@ async def cmd_silent(message: Message):
     silent_mode = not silent_mode
     state = "ON 🔇" if silent_mode else "OFF 🔊"
     await message.reply(f"Silent mode: {state}")
+
+
+@router.message(Command("gaymode"))
+async def cmd_gaymode(message: Message):
+    global gay_mode
+    if message.from_user.id not in ADMIN_IDS or message.chat.id != ALLOWED_CHAT_ID:
+        return
+
+    gay_mode = not gay_mode
+    state = "ON 🏳️‍🌈" if gay_mode else "OFF"
+    await message.reply(f"Gay mode: {state}")
 
 
 @router.message(Command("clear"))
