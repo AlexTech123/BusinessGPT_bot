@@ -1,6 +1,7 @@
 import os
 import logging
 import random
+import math
 import aiohttp
 import re
 import asyncio
@@ -59,6 +60,9 @@ router = Router()
 
 game_data: Dict[int, dict] = {}
 GROW_COOLDOWN = 12 * 3600
+FIGHT_COOLDOWN = 5 * 60
+LOTTERY_COOLDOWN = 24 * 3600
+last_lottery_global = 0.0
 
 
 def get_or_create_player(user_id: int, name: str) -> dict:
@@ -69,6 +73,7 @@ def get_or_create_player(user_id: int, name: str) -> dict:
             "wins": 0,
             "losses": 0,
             "last_grow": 0.0,
+            "last_fight": 0.0,
         }
     return game_data[user_id]
 
@@ -120,11 +125,17 @@ class HistoryMiddleware(BaseMiddleware):
         if user:
             logger.info(f"[ID] {user.full_name} | {user.id} | @{user.username}")
 
-        if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-            text = event.text or event.caption or ""
+        text = event.text or ""
+        is_silent_cmd = text.strip().lower() == "/silent"
 
-            if text and not text.strip().startswith("/"):
-                clean_text = re.sub(f"@{BOT_USERNAME}", "", text, flags=re.IGNORECASE).strip()
+        if silent_mode and not is_silent_cmd:
+            return
+
+        if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+            raw = event.text or event.caption or ""
+
+            if raw and not raw.strip().startswith("/"):
+                clean_text = re.sub(f"@{BOT_USERNAME}", "", raw, flags=re.IGNORECASE).strip()
                 clean_text = re.sub(r"\s+", " ", clean_text)
 
                 if clean_text:
@@ -222,7 +233,7 @@ async def cmd_help(message: Message):
         "/threshold [0.0-1.0] — random response probability\n"
         "/temperature [0.0-2.0] — model creativity\n"
         "/context_window [1-30] — context size\n"
-        "/silent — toggle silent mode (no responses)\n"
+        "/silent — заглушить/разглушить бота целиком\n"
         "/status — current settings & state\n"
         "/clear — clear context\n"
         "/stats — session statistics\n"
@@ -230,7 +241,9 @@ async def cmd_help(message: Message):
         "🍆 Growing Dick:\n"
         "/dick — показать свой размер\n"
         "/grow — попробовать вырастить (раз в 12ч)\n"
-        "/fight — дуэль (реплай или тег)\n"
+        "/fight — дуэль (реплай, кулдаун 5м)\n"
+        "/gift [см] — подарить (реплай)\n"
+        "/lottery — лотерея (раз в 24ч, все скидываются)\n"
         "/top — таблица лидеров"
     )
     await message.reply(text)
@@ -456,31 +469,26 @@ async def cmd_fight(message: Message):
     attacker_name = USER_MAPPING.get(user.id, user.full_name)
     attacker = get_or_create_player(user.id, attacker_name)
 
-    opponent_id = None
-    opponent_name = None
-
-    if message.reply_to_message and message.reply_to_message.from_user:
-        opp = message.reply_to_message.from_user
-        if not opp.is_bot:
-            opponent_id = opp.id
-            opponent_name = USER_MAPPING.get(opp.id, opp.full_name)
-
-    if opponent_id is None and message.entities:
-        for entity in message.entities:
-            if entity.type == "mention" and entity.user:
-                if not entity.user.is_bot:
-                    opponent_id = entity.user.id
-                    opponent_name = USER_MAPPING.get(entity.user.id, entity.user.full_name)
-                    break
-            elif entity.type == "text_mention" and entity.user:
-                if not entity.user.is_bot:
-                    opponent_id = entity.user.id
-                    opponent_name = USER_MAPPING.get(entity.user.id, entity.user.full_name)
-                    break
-
-    if opponent_id is None:
-        await message.reply("⚔️ Реплайни на сообщение соперника или тегни его: /fight @username")
+    now = time.time()
+    elapsed = now - attacker["last_fight"]
+    if elapsed < FIGHT_COOLDOWN:
+        remaining = int(FIGHT_COOLDOWN - elapsed)
+        minutes = remaining // 60
+        seconds = remaining % 60
+        await message.reply(f"⏳ Кулдаун! Попробуй через {minutes}м {seconds}с")
         return
+
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply("⚔️ Реплайни на сообщение соперника!")
+        return
+
+    opp = message.reply_to_message.from_user
+    if opp.is_bot:
+        await message.reply("🤖 С ботом драться нельзя!")
+        return
+
+    opponent_id = opp.id
+    opponent_name = USER_MAPPING.get(opp.id, opp.full_name)
 
     if opponent_id == user.id:
         await message.reply("🤦 Нельзя драться с самим собой!")
@@ -488,8 +496,12 @@ async def cmd_fight(message: Message):
 
     defender = get_or_create_player(opponent_id, opponent_name)
 
-    atk_power = round(attacker["size"] * random.uniform(0.5, 1.5), 1)
-    def_power = round(defender["size"] * random.uniform(0.5, 1.5), 1)
+    atk_roll = round(random.uniform(0, 100), 1)
+    def_roll = round(random.uniform(0, 100), 1)
+    atk_bonus = round(math.log2(max(attacker["size"], 1)) * 5, 1)
+    def_bonus = round(math.log2(max(defender["size"], 1)) * 5, 1)
+    atk_power = round(atk_roll + atk_bonus, 1)
+    def_power = round(def_roll + def_bonus, 1)
 
     transfer = round(random.uniform(1.0, 3.0), 1)
 
@@ -507,14 +519,122 @@ async def cmd_fight(message: Message):
 
     winner["wins"] += 1
     loser["losses"] += 1
+    attacker["last_fight"] = now
 
     await message.reply(
-        f"⚔️ {attacker['name']} ({atk_power}) vs {defender['name']} ({def_power})\n\n"
+        f"⚔️ {attacker['name']} 🎲{atk_roll}+{atk_bonus}={atk_power}\n"
+        f"⚔️ {defender['name']} 🎲{def_roll}+{def_bonus}={def_power}\n\n"
         f"🏆 Победил {winner_label}!\n"
         f"  +{actual_loss} см → {winner['size']} см {make_dick_visual(winner['size'])}\n"
         f"😢 Проиграл {loser_label}:\n"
         f"  -{actual_loss} см → {loser['size']} см {make_dick_visual(loser['size'])}"
     )
+
+
+@router.message(Command("gift"))
+async def cmd_gift(message: Message, command: CommandObject):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+
+    user = message.from_user
+    name = USER_MAPPING.get(user.id, user.full_name)
+    player = get_or_create_player(user.id, name)
+
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply("🎁 Реплайни на сообщение получателя: /gift 3")
+        return
+
+    opp = message.reply_to_message.from_user
+    if opp.is_bot:
+        await message.reply("🤖 Боту дарить нельзя!")
+        return
+
+    if opp.id == user.id:
+        await message.reply("🤦 Нельзя дарить самому себе!")
+        return
+
+    if not command.args:
+        await message.reply("🎁 Напиши сколько дарить: /gift 3")
+        return
+
+    try:
+        amount = round(float(command.args.replace(",", ".")), 1)
+    except ValueError:
+        await message.reply("❌ Напиши число: /gift 3")
+        return
+
+    if amount <= 0:
+        await message.reply("❌ Количество должно быть больше 0")
+        return
+
+    max_gift = round(player["size"] - 1.0, 1)
+    if amount > max_gift:
+        await message.reply(f"❌ Максимум: {max_gift} см (минимум 1.0 см остаётся)")
+        return
+
+    recipient_name = USER_MAPPING.get(opp.id, opp.full_name)
+    recipient = get_or_create_player(opp.id, recipient_name)
+
+    player["size"] = round(player["size"] - amount, 1)
+    recipient["size"] = round(recipient["size"] + amount, 1)
+
+    await message.reply(
+        f"🎁 {player['name']} → {recipient['name']}\n"
+        f"Передано: {amount} см\n\n"
+        f"{player['name']}: {player['size']} см {make_dick_visual(player['size'])}\n"
+        f"{recipient['name']}: {recipient['size']} см {make_dick_visual(recipient['size'])}"
+    )
+
+
+@router.message(Command("lottery"))
+async def cmd_lottery(message: Message):
+    global last_lottery_global
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+
+    if len(game_data) < 2:
+        await message.reply("🎰 Нужно минимум 2 игрока! Пусть все напишут /dick")
+        return
+
+    now = time.time()
+    elapsed = now - last_lottery_global
+    if elapsed < LOTTERY_COOLDOWN:
+        remaining = LOTTERY_COOLDOWN - elapsed
+        hours = int(remaining // 3600)
+        minutes = int((remaining % 3600) // 60)
+        await message.reply(f"⏳ Лотерея уже была! Следующая через {hours}ч {minutes}м")
+        return
+
+    last_lottery_global = now
+
+    entry_fee = 1.0
+    pot = 0.0
+    contributors = []
+
+    for uid, p in game_data.items():
+        if p["size"] > 1.0:
+            take = min(entry_fee, round(p["size"] - 1.0, 1))
+            p["size"] = round(p["size"] - take, 1)
+            pot = round(pot + take, 1)
+            contributors.append(p["name"])
+
+    if pot == 0:
+        await message.reply("🎰 Ни у кого нет лишних см для взноса!")
+        return
+
+    winner_id = random.choice(list(game_data.keys()))
+    winner = game_data[winner_id]
+    winner["size"] = round(winner["size"] + pot, 1)
+
+    lines = [
+        f"🎰 ЛОТЕРЕЯ!\n",
+        f"Взнос: {entry_fee} см с каждого",
+        f"Участники: {len(contributors)}",
+        f"Банк: {pot} см\n",
+        f"🏆 Победитель: {winner['name']}!",
+        f"  +{pot} см → {winner['size']} см {make_dick_visual(winner['size'])}",
+    ]
+    await message.reply("\n".join(lines))
 
 
 @router.message(Command("top"))
@@ -550,9 +670,6 @@ async def handle_messages(message: Message):
         return
 
     if (datetime.now(message.date.tzinfo) - message.date).total_seconds() > 120:
-        return
-
-    if silent_mode:
         return
 
     trigger_type = None
