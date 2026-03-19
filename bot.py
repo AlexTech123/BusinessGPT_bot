@@ -55,8 +55,27 @@ logger.info(f"ALLOWED CHAT ID: {ALLOWED_CHAT_ID}")
 chat_histories: Dict[int, deque] = {}
 api_lock = asyncio.Lock()
 silent_mode = False
-gay_mode = False
 router = Router()
+
+game_data: Dict[int, dict] = {}
+GROW_COOLDOWN = 12 * 3600
+
+
+def get_or_create_player(user_id: int, name: str) -> dict:
+    if user_id not in game_data:
+        game_data[user_id] = {
+            "name": name,
+            "size": round(random.uniform(5.0, 15.0), 1),
+            "wins": 0,
+            "losses": 0,
+            "last_grow": 0.0,
+        }
+    return game_data[user_id]
+
+
+def make_dick_visual(size: float) -> str:
+    length = max(1, int(size / 3))
+    return "8" + "=" * length + "D"
 
 session_stats: Dict[str, Any] = {
     "user_messages": {},
@@ -150,19 +169,10 @@ async def make_api_request(chat_id: int) -> str | None:
         newline_pos = context_lines.find("\n")
         if newline_pos != -1:
             context_lines = context_lines[newline_pos + 1:]
-    if gay_mode:
-        context_string = (
-            f"<|im_start|>system\n"
-            f"Ты гей и тебе нравятся парни из чата. "
-            f"Флиртуй, делай комплименты парням, будь максимально дерзким и игривым.<|im_end|>\n"
-            f"<|im_start|>user\n{context_lines}<|im_end|>\n"
-            f"<|im_start|>assistant\n"
-        )
-    else:
-        context_string = (
-            f"<|im_start|>user\n{context_lines}<|im_end|>\n"
-            f"<|im_start|>assistant\n"
-        )
+    context_string = (
+        f"<|im_start|>user\n{context_lines}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
 
     url = ML_MODEL_URL
     if not url.endswith("generate"):
@@ -208,15 +218,20 @@ async def cmd_help(message: Message):
 
     text = (
         "📋 Commands:\n\n"
+        "⚙️ Admin:\n"
         "/threshold [0.0-1.0] — random response probability\n"
         "/temperature [0.0-2.0] — model creativity\n"
         "/context_window [1-30] — context size\n"
         "/silent — toggle silent mode (no responses)\n"
-        "/gaymode — toggle gay mode 🏳️‍🌈\n"
         "/status — current settings & state\n"
         "/clear — clear context\n"
         "/stats — session statistics\n"
-        "/help — this message"
+        "/help — this message\n\n"
+        "🍆 Growing Dick:\n"
+        "/dick — показать свой размер\n"
+        "/grow — попробовать вырастить (раз в 12ч)\n"
+        "/fight — дуэль (реплай или тег)\n"
+        "/top — таблица лидеров"
     )
     await message.reply(text)
 
@@ -296,15 +311,13 @@ async def cmd_status(message: Message):
     lock_state = "busy" if api_lock.locked() else "free"
 
     silent_state = "ON 🔇" if silent_mode else "OFF 🔊"
-    gay_state = "ON 🏳️‍🌈" if gay_mode else "OFF"
 
     text = (
         f"⚙️ Settings:\n"
         f"  Threshold: {CURRENT_THRESHOLD}\n"
         f"  Temperature: {CURRENT_TEMPERATURE}\n"
         f"  Context window: {CURRENT_CONTEXT_WINDOW}\n"
-        f"  Silent mode: {silent_state}\n"
-        f"  Gay mode: {gay_state}\n\n"
+        f"  Silent mode: {silent_state}\n\n"
         f"📊 Context:\n"
         f"  Messages in queue: {queue_size}/{CURRENT_CONTEXT_WINDOW}\n"
         f"  API lock: {lock_state}"
@@ -321,17 +334,6 @@ async def cmd_silent(message: Message):
     silent_mode = not silent_mode
     state = "ON 🔇" if silent_mode else "OFF 🔊"
     await message.reply(f"Silent mode: {state}")
-
-
-@router.message(Command("gaymode"))
-async def cmd_gaymode(message: Message):
-    global gay_mode
-    if message.from_user.id not in ADMIN_IDS or message.chat.id != ALLOWED_CHAT_ID:
-        return
-
-    gay_mode = not gay_mode
-    state = "ON 🏳️‍🌈" if gay_mode else "OFF"
-    await message.reply(f"Gay mode: {state}")
 
 
 @router.message(Command("clear"))
@@ -374,6 +376,167 @@ async def cmd_stats(message: Message):
         lines.append(f"Fastest: {min(times):.1f}s | Slowest: {max(times):.1f}s")
     else:
         lines.append("No responses yet")
+
+    await message.reply("\n".join(lines))
+
+
+@router.message(Command("dick"))
+async def cmd_dick(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+
+    user = message.from_user
+    name = USER_MAPPING.get(user.id, user.full_name)
+    player = get_or_create_player(user.id, name)
+
+    visual = make_dick_visual(player["size"])
+    await message.reply(
+        f"🍆 {player['name']}\n"
+        f"Размер: {player['size']} см\n"
+        f"{visual}\n"
+        f"Победы: {player['wins']} | Поражения: {player['losses']}"
+    )
+
+
+@router.message(Command("grow"))
+async def cmd_grow(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+
+    user = message.from_user
+    name = USER_MAPPING.get(user.id, user.full_name)
+    player = get_or_create_player(user.id, name)
+
+    now = time.time()
+    elapsed = now - player["last_grow"]
+    if elapsed < GROW_COOLDOWN:
+        remaining = GROW_COOLDOWN - elapsed
+        hours = int(remaining // 3600)
+        minutes = int((remaining % 3600) // 60)
+        await message.reply(f"⏳ Кулдаун! Попробуй через {hours}ч {minutes}м")
+        return
+
+    base = random.uniform(-3.0, 5.0)
+    multiplier = random.choice([0.5, 1.0, 1.0, 1.0, 1.5, 2.0])
+    change = round(base * multiplier, 1)
+
+    old_size = player["size"]
+    player["size"] = max(1.0, round(old_size + change, 1))
+    player["last_grow"] = now
+
+    actual_change = round(player["size"] - old_size, 1)
+    visual = make_dick_visual(player["size"])
+
+    if actual_change > 0:
+        emoji = "📈"
+        sign = "+"
+    elif actual_change < 0:
+        emoji = "📉"
+        sign = ""
+    else:
+        emoji = "😐"
+        sign = ""
+
+    mult_str = f" (x{multiplier})" if multiplier != 1.0 else ""
+
+    await message.reply(
+        f"{emoji} {player['name']}\n"
+        f"Бросок: {sign}{actual_change} см{mult_str}\n"
+        f"Размер: {player['size']} см\n"
+        f"{visual}"
+    )
+
+
+@router.message(Command("fight"))
+async def cmd_fight(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+
+    user = message.from_user
+    attacker_name = USER_MAPPING.get(user.id, user.full_name)
+    attacker = get_or_create_player(user.id, attacker_name)
+
+    opponent_id = None
+    opponent_name = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        opp = message.reply_to_message.from_user
+        if not opp.is_bot:
+            opponent_id = opp.id
+            opponent_name = USER_MAPPING.get(opp.id, opp.full_name)
+
+    if opponent_id is None and message.entities:
+        for entity in message.entities:
+            if entity.type == "mention" and entity.user:
+                if not entity.user.is_bot:
+                    opponent_id = entity.user.id
+                    opponent_name = USER_MAPPING.get(entity.user.id, entity.user.full_name)
+                    break
+            elif entity.type == "text_mention" and entity.user:
+                if not entity.user.is_bot:
+                    opponent_id = entity.user.id
+                    opponent_name = USER_MAPPING.get(entity.user.id, entity.user.full_name)
+                    break
+
+    if opponent_id is None:
+        await message.reply("⚔️ Реплайни на сообщение соперника или тегни его: /fight @username")
+        return
+
+    if opponent_id == user.id:
+        await message.reply("🤦 Нельзя драться с самим собой!")
+        return
+
+    defender = get_or_create_player(opponent_id, opponent_name)
+
+    atk_power = round(attacker["size"] * random.uniform(0.5, 1.5), 1)
+    def_power = round(defender["size"] * random.uniform(0.5, 1.5), 1)
+
+    transfer = round(random.uniform(1.0, 3.0), 1)
+
+    if atk_power >= def_power:
+        winner, loser = attacker, defender
+        winner_label, loser_label = attacker["name"], defender["name"]
+    else:
+        winner, loser = defender, attacker
+        winner_label, loser_label = defender["name"], attacker["name"]
+
+    loser_old = loser["size"]
+    loser["size"] = max(1.0, round(loser["size"] - transfer, 1))
+    actual_loss = round(loser_old - loser["size"], 1)
+    winner["size"] = round(winner["size"] + actual_loss, 1)
+
+    winner["wins"] += 1
+    loser["losses"] += 1
+
+    await message.reply(
+        f"⚔️ {attacker['name']} ({atk_power}) vs {defender['name']} ({def_power})\n\n"
+        f"🏆 Победил {winner_label}!\n"
+        f"  +{actual_loss} см → {winner['size']} см {make_dick_visual(winner['size'])}\n"
+        f"😢 Проиграл {loser_label}:\n"
+        f"  -{actual_loss} см → {loser['size']} см {make_dick_visual(loser['size'])}"
+    )
+
+
+@router.message(Command("top"))
+async def cmd_top(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+
+    if not game_data:
+        await message.reply("🏆 Ещё никто не играет! Напиши /dick чтобы начать")
+        return
+
+    sorted_players = sorted(game_data.values(), key=lambda p: p["size"], reverse=True)
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 Топ игроков:\n"]
+    for i, p in enumerate(sorted_players):
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        lines.append(
+            f"{medal} {p['name']} — {p['size']} см "
+            f"{make_dick_visual(p['size'])} "
+            f"({p['wins']}W/{p['losses']}L)"
+        )
 
     await message.reply("\n".join(lines))
 
