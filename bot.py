@@ -42,7 +42,7 @@ MAX_MESSAGE_CHARS = 700
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-CURRENT_THRESHOLD = float(os.getenv("THRESHOLD", "0.2"))
+CURRENT_THRESHOLD = float(os.getenv("THRESHOLD", "0.08"))
 CURRENT_TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 CURRENT_CONTEXT_WINDOW = int(os.getenv("CONTEXT_WINDOW", "10"))
 ML_MODEL_URL = os.getenv("ML_MODEL_URL")
@@ -59,20 +59,127 @@ logger.info(f"ALLOWED CHAT ID: {ALLOWED_CHAT_ID}")
 chat_histories: Dict[int, deque] = {}
 api_lock = asyncio.Lock()
 silent_mode = False
+auto_delete_seconds = 0
 router = Router()
 
+
+async def reply_game(message: Message, text: str):
+    sent = await message.reply(text, disable_notification=True)
+    if auto_delete_seconds > 0:
+        asyncio.create_task(_delete_later(sent, auto_delete_seconds))
+    return sent
+
+
+async def _delete_later(msg: Message, delay: int):
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
 game_data: Dict[int, dict] = {}
-GROW_COOLDOWN = 12 * 3600
-FIGHT_COOLDOWN = 10 * 60
-LOTTERY_COOLDOWN = 24 * 3600
-BUY_COOLDOWN = 6 * 3600
+cooldowns = {
+    "grow": 12 * 3600,
+    "fight": 10 * 60,
+    "lottery": 24 * 3600,
+    "buy": 3600,
+}
 last_lottery_global = 0.0
 
 SHOP_ITEMS = {
-    "condom": {"price_pct": 0.03, "desc": "потери в бою = 0"},
-    "viagra": {"price_pct": 0.03, "desc": "победа в бою: x2 забор"},
-    "lube": {"price_pct": 0.02, "desc": "grow не уйдёт в минус"},
+    "condom": {"price_pct": 0.03, "desc": "защита в бою"},
+    "viagra": {"price_pct": 0.03, "desc": "x2 забор"},
+    "lube": {"price_pct": 0.02, "desc": "grow без минуса"},
 }
+
+GROW_POS = [
+    "{n} вырос на {d} см! Теперь {s} см 📈",
+    "{n} прибавил {d} см! Теперь {s} см 📈",
+    "У {n} +{d} см! Теперь {s} см 📈",
+    "{n} отрастил {d} см! Теперь {s} см 📈",
+    "{n} подрос на {d} см! Теперь {s} см 📈",
+    "+{d} см для {n}! Теперь {s} см 📈",
+    "{n} нарастил {d} см! Теперь {s} см 📈",
+    "{n} окреп на {d} см! Теперь {s} см 📈",
+    "У {n} прирост {d} см! Теперь {s} см 📈",
+    "{n} набрал {d} см! Теперь {s} см 📈",
+]
+GROW_NEG = [
+    "{n} усох на {d} см. Теперь {s} см 📉",
+    "{n} потерял {d} см. Теперь {s} см 📉",
+    "У {n} -{d} см. Теперь {s} см 📉",
+    "{n} скукожился на {d} см. Теперь {s} см 📉",
+    "{n} сдулся на {d} см. Теперь {s} см 📉",
+    "-{d} см у {n}. Теперь {s} см 📉",
+    "{n} уменьшился на {d} см. Теперь {s} см 📉",
+    "{n} просел на {d} см. Теперь {s} см 📉",
+    "У {n} убыло {d} см. Теперь {s} см 📉",
+    "{n} растерял {d} см. Теперь {s} см 📉",
+]
+GROW_ZERO = [
+    "{n} остался при своём. {s} см 😐",
+    "Без изменений. {s} см 😐",
+    "Ничего не произошло. {s} см 😐",
+    "{n} потоптался на месте. {s} см 😐",
+    "Пусто. {n} всё ещё {s} см 😐",
+    "{n} замер на {s} см 😐",
+]
+GROW_LUBE = [
+    "Смазка спасла {n} от потерь! {s} см 🧴",
+    "{n} намазался и не усох! {s} см 🧴",
+    "Lube сработал — {n} не потерял ничего! {s} см 🧴",
+    "{n} проскользнул мимо потерь! {s} см 🧴",
+    "Смазка защитила {n}! Всё ещё {s} см 🧴",
+]
+FIGHT_CHALLENGE = [
+    "{a} вызвал {d} на бой!",
+    "{a} бросил вызов {d}!",
+    "{a} напал на {d}!",
+    "{a} наехал на {d}!",
+    "{a} полез на {d}!",
+    "{a} кинул перчатку {d}!",
+    "Внимание! {a} против {d}!",
+    "{a} решил помериться с {d}!",
+]
+FIGHT_WIN = [
+    "{w} победил и забрал {t} см ⚔️",
+    "{w} выиграл и отжал {t} см ⚔️",
+    "Победа за {w}! +{t} см ⚔️",
+    "{w} оказался сильнее! +{t} см ⚔️",
+    "{w} доминирует! +{t} см ⚔️",
+    "{w} унизил соперника! +{t} см ⚔️",
+    "{w} забрал {t} см себе ⚔️",
+    "{w} отобрал {t} см ⚔️",
+]
+FIGHT_CONDOM = [
+    "{l} надел кондом — потери 0! 🛡️",
+    "Кондом спас {l} от потерь! 🛡️",
+    "{l} защитился кондомом! 🛡️",
+    "Кондом {l} принял удар на себя! 🛡️",
+    "{l} остался цел благодаря кондому! 🛡️",
+]
+FIGHT_VIAGRA = [
+    "Виагра {w} удвоила добычу! 💊",
+    "{w} на виагре — забрал x2! 💊",
+    "Виагра сработала! Двойной улов для {w} 💊",
+    "{w} под виагрой — двойная мощь! 💊",
+    "Эффект виагры: {w} берёт вдвойне! 💊",
+]
+GIFT_PHRASES = [
+    "{g} подарил {r} {a} см 🎁",
+    "{g} отдал {r} {a} см 🎁",
+    "{g} кинул {r} {a} см 🎁",
+    "{g} пожертвовал {r} {a} см 🎁",
+    "{r} получил {a} см от {g} 🎁",
+]
+LOTTERY_WIN = [
+    "{w} забирает всё — {s} см 🎰",
+    "{w} срывает куш! Теперь {s} см 🎰",
+    "Джекпот у {w}! Теперь {s} см 🎰",
+    "Всё уходит {w} — {s} см 🎰",
+    "{w} выиграл лотерею! Теперь {s} см 🎰",
+    "Удача на стороне {w} — {s} см 🎰",
+]
 
 
 def get_or_create_player(user_id: int, name: str) -> dict:
@@ -87,9 +194,6 @@ def get_or_create_player(user_id: int, name: str) -> dict:
         }
     return game_data[user_id]
 
-
-def dick_vis(size: float) -> str:
-    return "8" + "=" * max(1, int(size / 3)) + "D"
 
 session_stats: Dict[str, Any] = {
     "user_messages": {},
@@ -242,6 +346,10 @@ async def cmd_help(message: Message):
         "/temperature [0.0-2.0]\n"
         "/context_window [1-30]\n"
         "/silent — заглушить бота\n"
+        "/autodelete [сек] — автоудаление (-1=выкл)\n"
+        "/cd [grow|fight|lottery|buy] [сек]\n"
+        "/setsize [размер] — реплай на игрока\n"
+        "/resetgame — сброс всей игры\n"
         "/status /clear /stats"
     )
     await message.reply(text)
@@ -323,15 +431,21 @@ async def cmd_status(message: Message):
 
     silent_state = "ON 🔇" if silent_mode else "OFF 🔊"
 
+    ad = f"{auto_delete_seconds}s" if auto_delete_seconds > 0 else "выкл"
+    cd_lines = ", ".join(f"{k}={fmt_cd(v)}" for k, v in cooldowns.items())
+
     text = (
         f"⚙️ Settings:\n"
         f"  Threshold: {CURRENT_THRESHOLD}\n"
         f"  Temperature: {CURRENT_TEMPERATURE}\n"
         f"  Context window: {CURRENT_CONTEXT_WINDOW}\n"
-        f"  Silent mode: {silent_state}\n\n"
+        f"  Silent mode: {silent_state}\n"
+        f"  Auto-delete: {ad}\n"
+        f"  CD: {cd_lines}\n\n"
         f"📊 Context:\n"
         f"  Messages in queue: {queue_size}/{CURRENT_CONTEXT_WINDOW}\n"
-        f"  API lock: {lock_state}"
+        f"  API lock: {lock_state}\n"
+        f"  Players: {len(game_data)}"
     )
     await message.reply(text)
 
@@ -345,6 +459,95 @@ async def cmd_silent(message: Message):
     silent_mode = not silent_mode
     state = "ON 🔇" if silent_mode else "OFF 🔊"
     await message.reply(f"Silent mode: {state}")
+
+
+@router.message(Command("autodelete"))
+async def cmd_autodelete(message: Message, command: CommandObject):
+    global auto_delete_seconds
+    if message.from_user.id not in ADMIN_IDS or message.chat.id != ALLOWED_CHAT_ID:
+        return
+    if not command.args:
+        state = f"{auto_delete_seconds}s" if auto_delete_seconds > 0 else "выкл"
+        await message.reply(f"Auto-delete: {state}")
+        return
+    try:
+        value = int(command.args)
+        if value <= 0:
+            auto_delete_seconds = 0
+            await message.reply("✅ Auto-delete: выкл")
+        elif value <= 300:
+            auto_delete_seconds = value
+            await message.reply(f"✅ Auto-delete: {value}s")
+        else:
+            await message.reply("❌ 1-300 или -1")
+    except ValueError:
+        pass
+
+
+def fmt_cd(seconds: int) -> str:
+    if seconds >= 3600:
+        h, r = divmod(seconds, 3600)
+        m = r // 60
+        return f"{h}ч {m}м" if m else f"{h}ч"
+    if seconds >= 60:
+        return f"{seconds // 60}м {seconds % 60}с" if seconds % 60 else f"{seconds // 60}м"
+    return f"{seconds}с"
+
+
+@router.message(Command("cd"))
+async def cmd_cd(message: Message, command: CommandObject):
+    if message.from_user.id not in ADMIN_IDS or message.chat.id != ALLOWED_CHAT_ID:
+        return
+    if not command.args:
+        lines = [f"  {k}: {fmt_cd(v)}" for k, v in cooldowns.items()]
+        await message.reply("⏱ Кулдауны:\n" + "\n".join(lines))
+        return
+    parts = command.args.strip().split()
+    if len(parts) != 2 or parts[0] not in cooldowns:
+        await message.reply("❌ /cd grow|fight|lottery|buy [сек]")
+        return
+    try:
+        value = int(parts[1])
+        if value < 0:
+            await message.reply("❌ >= 0")
+            return
+        cooldowns[parts[0]] = value
+        await message.reply(f"✅ {parts[0]}: {fmt_cd(value)}")
+    except ValueError:
+        pass
+
+
+@router.message(Command("setsize"))
+async def cmd_setsize(message: Message, command: CommandObject):
+    if message.from_user.id not in ADMIN_IDS or message.chat.id != ALLOWED_CHAT_ID:
+        return
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply("❌ Реплайни на игрока")
+        return
+    if not command.args:
+        await message.reply("❌ /setsize 15.0")
+        return
+    try:
+        value = round(float(command.args.replace(",", ".")), 1)
+        if value < 1.0:
+            await message.reply("❌ >= 1.0")
+            return
+    except ValueError:
+        return
+    target = message.reply_to_message.from_user
+    p = get_or_create_player(target.id, USER_MAPPING.get(target.id, target.full_name))
+    old = p["size"]
+    p["size"] = value
+    await message.reply(f"✅ {p['name']}: {old} → {value} см")
+
+
+@router.message(Command("resetgame"))
+async def cmd_resetgame(message: Message):
+    if message.from_user.id not in ADMIN_IDS or message.chat.id != ALLOWED_CHAT_ID:
+        return
+    count = len(game_data)
+    game_data.clear()
+    await message.reply(f"🗑 Игра сброшена ({count} игроков)")
 
 
 @router.message(Command("clear"))
@@ -395,7 +598,7 @@ async def cmd_stats(message: Message):
 async def cmd_game(message: Message):
     if message.chat.id != ALLOWED_CHAT_ID:
         return
-    await message.reply(
+    await reply_game(message,
         "/dick — твой размер\n"
         "/grow — вырастить (кд 12ч)\n"
         "/fight — бой реплаем (кд 10м)\n"
@@ -403,7 +606,7 @@ async def cmd_game(message: Message):
         "/gift 3 — подарить (реплай)\n"
         "/lottery — лотерея (кд 24ч)\n"
         "/shop — магазин\n"
-        "/buy condom|viagra|lube (кд 6ч)\n"
+        "/buy condom|viagra|lube (кд 1ч)\n"
         "/top — рейтинг"
     )
 
@@ -415,7 +618,7 @@ async def cmd_dick(message: Message):
     user = message.from_user
     p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
     item_str = f" [{p['item']}]" if p["item"] else ""
-    await message.reply(f"🍆 {p['name']} — {p['size']} см {dick_vis(p['size'])}{item_str}")
+    await reply_game(message, f"{p['name']} — {p['size']} см 🍆{item_str}")
 
 
 @router.message(Command("grow"))
@@ -426,18 +629,20 @@ async def cmd_grow(message: Message):
     p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
 
     now = time.time()
-    if now - p["last_grow"] < GROW_COOLDOWN:
-        rem = GROW_COOLDOWN - (now - p["last_grow"])
-        await message.reply(f"⏳ {int(rem // 3600)}ч {int((rem % 3600) // 60)}м")
+    if now - p["last_grow"] < cooldowns["grow"]:
+        rem = cooldowns["grow"] - (now - p["last_grow"])
+        await reply_game(message, f"Подожди ещё {int(rem // 3600)}ч {int((rem % 3600) // 60)}м ⏳")
         return
 
     base = p["size"] * random.uniform(-0.15, 0.25)
     multiplier = random.choice([0.5, 1.0, 1.0, 1.0, 1.5, 2.0])
     change = round(base * multiplier, 1)
 
+    lube_used = False
     if p["item"] == "lube" and change < 0:
         change = 0
         p["item"] = None
+        lube_used = True
 
     old = p["size"]
     p["size"] = max(1.0, round(old + change, 1))
@@ -447,10 +652,17 @@ async def cmd_grow(message: Message):
     if p["item"] == "lube":
         p["item"] = None
 
-    sign = "+" if actual >= 0 else ""
-    emoji = "📈" if actual > 0 else ("📉" if actual < 0 else "😐")
-    mult_str = f" (x{multiplier})" if multiplier != 1.0 else ""
-    await message.reply(f"{emoji} {p['name']}: {sign}{actual}{mult_str} → {p['size']} см")
+    n = p["name"]
+    s = p["size"]
+    if lube_used:
+        text = random.choice(GROW_LUBE).format(n=n, s=s)
+    elif actual > 0:
+        text = random.choice(GROW_POS).format(n=n, d=actual, s=s)
+    elif actual < 0:
+        text = random.choice(GROW_NEG).format(n=n, d=abs(actual), s=s)
+    else:
+        text = random.choice(GROW_ZERO).format(n=n, s=s)
+    await reply_game(message, text)
 
 
 @router.message(Command("fight"))
@@ -461,20 +673,20 @@ async def cmd_fight(message: Message, command: CommandObject):
     atk = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
 
     now = time.time()
-    if now - atk["last_fight"] < FIGHT_COOLDOWN:
-        rem = int(FIGHT_COOLDOWN - (now - atk["last_fight"]))
-        await message.reply(f"⏳ {rem // 60}м {rem % 60}с")
+    if now - atk["last_fight"] < cooldowns["fight"]:
+        rem = int(cooldowns["fight"] - (now - atk["last_fight"]))
+        await reply_game(message, f"Подожди ещё {rem // 60}м {rem % 60}с ⏳")
         return
 
     if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply("⚔️ Реплайни на соперника")
+        await reply_game(message, "Реплайни на соперника ⚔️")
         return
     opp = message.reply_to_message.from_user
     if opp.is_bot:
-        await message.reply("⚔️ С ботом нельзя")
+        await reply_game(message, "С ботом нельзя драться ⚔️")
         return
     if opp.id == user.id:
-        await message.reply("⚔️ Нельзя с собой")
+        await reply_game(message, "Нельзя драться с собой ⚔️")
         return
 
     dfn = get_or_create_player(opp.id, USER_MAPPING.get(opp.id, opp.full_name))
@@ -486,10 +698,10 @@ async def cmd_fight(message: Message, command: CommandObject):
             max_bet = min(dfn["size"] * 0.25, atk["size"] - 1.0)
             max_bet = max(0.1, round(max_bet, 1))
             if bet <= 0 or bet > max_bet:
-                await message.reply(f"⚔️ Ставка 0.1—{max_bet}")
+                await reply_game(message, f"Ставка от 0.1 до {max_bet} ⚔️")
                 return
         except ValueError:
-            await message.reply("⚔️ /fight или /fight 5")
+            await reply_game(message, "/fight или /fight 5 ⚔️")
             return
 
     atk_power = random.uniform(0, 100) + min(atk["size"] * 0.5, 15)
@@ -505,15 +717,20 @@ async def cmd_fight(message: Message, command: CommandObject):
     else:
         transfer = max(0.5, round(loser["size"] * random.uniform(0.1, 0.25), 1))
 
+    viagra_used = False
+    condom_used = False
+
     if winner["item"] == "viagra":
         transfer = min(round(transfer * 2, 1), round(loser["size"] * 0.3, 1))
         winner["item"] = None
+        viagra_used = True
     elif winner["item"] in ("condom", "lube"):
         winner["item"] = None
 
     if loser["item"] == "condom":
         transfer = 0
         loser["item"] = None
+        condom_used = True
     elif loser["item"] in ("viagra", "lube"):
         loser["item"] = None
 
@@ -523,13 +740,16 @@ async def cmd_fight(message: Message, command: CommandObject):
     winner["size"] = round(winner["size"] + actual, 1)
     atk["last_fight"] = now
 
-    bet_str = f" ({bet})" if bet else ""
-    await message.reply(
-        f"⚔️ {atk['name']} vs {dfn['name']}{bet_str}\n"
-        f"🏆 Победил {winner['name']}!\n"
-        f"{winner['name']} +{actual} → {winner['size']}\n"
-        f"{loser['name']} -{actual} → {loser['size']}"
-    )
+    bet_str = f" (ставка {bet})" if bet else ""
+    line1 = random.choice(FIGHT_CHALLENGE).format(a=atk["name"], d=dfn["name"]) + bet_str
+    line2 = random.choice(FIGHT_WIN).format(w=winner["name"], t=actual)
+    lines = [line1, line2]
+    if condom_used:
+        lines.append(random.choice(FIGHT_CONDOM).format(l=loser["name"]))
+    if viagra_used:
+        lines.append(random.choice(FIGHT_VIAGRA).format(w=winner["name"]))
+    lines.append(f"{winner['name']} {winner['size']} см | {loser['name']} {loser['size']} см")
+    await reply_game(message, "\n".join(lines))
 
 
 @router.message(Command("gift"))
@@ -540,13 +760,13 @@ async def cmd_gift(message: Message, command: CommandObject):
     p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
 
     if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply("🎁 Реплайни: /gift 3")
+        await reply_game(message, "/gift 3 — реплайни на получателя 🎁")
         return
     opp = message.reply_to_message.from_user
     if opp.is_bot or opp.id == user.id:
         return
     if not command.args:
-        await message.reply("🎁 /gift 3")
+        await reply_game(message, "/gift 3 — укажи сколько 🎁")
         return
     try:
         amount = round(float(command.args.replace(",", ".")), 1)
@@ -556,13 +776,14 @@ async def cmd_gift(message: Message, command: CommandObject):
         return
     max_gift = round(p["size"] - 1.0, 1)
     if amount > max_gift:
-        await message.reply(f"🎁 Макс: {max_gift}")
+        await reply_game(message, f"Максимум {max_gift} см 🎁")
         return
 
     r = get_or_create_player(opp.id, USER_MAPPING.get(opp.id, opp.full_name))
     p["size"] = round(p["size"] - amount, 1)
     r["size"] = round(r["size"] + amount, 1)
-    await message.reply(f"🎁 {p['name']} → {r['name']}: {amount} см")
+    text = random.choice(GIFT_PHRASES).format(g=p["name"], r=r["name"], a=amount)
+    await reply_game(message, text)
 
 
 @router.message(Command("lottery"))
@@ -571,13 +792,13 @@ async def cmd_lottery(message: Message):
     if message.chat.id != ALLOWED_CHAT_ID:
         return
     if len(game_data) < 2:
-        await message.reply("🎰 Нужно 2+ игрока")
+        await reply_game(message, "Нужно 2+ игрока 🎰")
         return
 
     now = time.time()
-    if now - last_lottery_global < LOTTERY_COOLDOWN:
-        rem = LOTTERY_COOLDOWN - (now - last_lottery_global)
-        await message.reply(f"⏳ {int(rem // 3600)}ч {int((rem % 3600) // 60)}м")
+    if now - last_lottery_global < cooldowns["lottery"]:
+        rem = cooldowns["lottery"] - (now - last_lottery_global)
+        await reply_game(message, f"Подожди ещё {int(rem // 3600)}ч {int((rem % 3600) // 60)}м ⏳")
         return
 
     last_lottery_global = now
@@ -594,10 +815,8 @@ async def cmd_lottery(message: Message):
 
     w = game_data[random.choice(list(game_data.keys()))]
     w["size"] = round(w["size"] + pot, 1)
-    await message.reply(
-        f"🎰 Банк: {pot} см\n"
-        f"🏆 {w['name']} +{pot} → {w['size']} см"
-    )
+    line2 = random.choice(LOTTERY_WIN).format(w=w["name"], s=w["size"])
+    await reply_game(message, f"Лотерея! Банк: {pot} см\n{line2}")
 
 
 @router.message(Command("shop"))
@@ -607,17 +826,19 @@ async def cmd_shop(message: Message):
     user = message.from_user
     p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
 
-    lines = ["🛒 Магазин:\n"]
+    lines = []
     for name, info in SHOP_ITEMS.items():
         price = max(0.1, round(p["size"] * info["price_pct"], 1))
-        lines.append(f"  {name} ({price} см) — {info['desc']}")
+        lines.append(f"🛒 {name} — {info['desc']} (цена: {price} см)")
     if p["item"]:
-        lines.append(f"\n🎒 Активный: {p['item']}")
+        lines.append(f"Есть: {p['item']} 🎒")
     now = time.time()
-    if now - p["last_buy"] < BUY_COOLDOWN:
-        rem = BUY_COOLDOWN - (now - p["last_buy"])
-        lines.append(f"⏳ Покупка через {int(rem // 3600)}ч {int((rem % 3600) // 60)}м")
-    await message.reply("\n".join(lines))
+    if now - p["last_buy"] < cooldowns["buy"]:
+        rem = cooldowns["buy"] - (now - p["last_buy"])
+        h, m = int(rem // 3600), int((rem % 3600) // 60)
+        cd = f"{h}ч {m}м" if h > 0 else f"{m}м"
+        lines.append(f"Подожди ещё {cd} ⏳")
+    await reply_game(message, "\n".join(lines))
 
 
 @router.message(Command("buy"))
@@ -628,29 +849,31 @@ async def cmd_buy(message: Message, command: CommandObject):
     p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
 
     if not command.args or command.args.strip().lower() not in SHOP_ITEMS:
-        await message.reply("🛒 /buy condom|viagra|lube")
+        await reply_game(message, "/buy condom|viagra|lube 🛒")
         return
     if p["item"]:
-        await message.reply(f"🛒 Уже есть: {p['item']}")
+        await reply_game(message, f"Уже есть: {p['item']} 🛒")
         return
 
     now = time.time()
-    if now - p["last_buy"] < BUY_COOLDOWN:
-        rem = BUY_COOLDOWN - (now - p["last_buy"])
-        await message.reply(f"⏳ {int(rem // 3600)}ч {int((rem % 3600) // 60)}м")
+    if now - p["last_buy"] < cooldowns["buy"]:
+        rem = cooldowns["buy"] - (now - p["last_buy"])
+        h, m = int(rem // 3600), int((rem % 3600) // 60)
+        cd = f"{h}ч {m}м" if h > 0 else f"{m}м"
+        await reply_game(message, f"Подожди ещё {cd} ⏳")
         return
 
     item_name = command.args.strip().lower()
     price = max(0.1, round(p["size"] * SHOP_ITEMS[item_name]["price_pct"], 1))
 
     if p["size"] - price < 1.0:
-        await message.reply("🛒 Не хватает см")
+        await reply_game(message, "Не хватает см 🛒")
         return
 
     p["size"] = round(p["size"] - price, 1)
     p["item"] = item_name
     p["last_buy"] = now
-    await message.reply(f"🛒 {p['name']}: {item_name} (-{price} см)")
+    await reply_game(message, f"{p['name']} купил {item_name} за {price} см ✅")
 
 
 @router.message(Command("top"))
@@ -658,7 +881,7 @@ async def cmd_top(message: Message):
     if message.chat.id != ALLOWED_CHAT_ID:
         return
     if not game_data:
-        await message.reply("🏆 /dick чтобы начать")
+        await reply_game(message, "/dick чтобы начать 🏆")
         return
 
     sorted_p = sorted(game_data.values(), key=lambda x: x["size"], reverse=True)
@@ -666,8 +889,8 @@ async def cmd_top(message: Message):
     lines = []
     for i, p in enumerate(sorted_p):
         m = medals[i] if i < 3 else f"{i + 1}."
-        lines.append(f"{m} {p['name']} — {p['size']} {dick_vis(p['size'])}")
-    await message.reply("\n".join(lines))
+        lines.append(f"{m} {p['name']} — {p['size']} см")
+    await reply_game(message, "\n".join(lines))
 
 
 @router.message()
