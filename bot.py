@@ -66,16 +66,19 @@ router = Router()
 async def reply_game(message: Message, text: str):
     sent = await message.reply(text, disable_notification=True)
     if auto_delete_seconds > 0:
+        logger.info(f"[AUTODELETE] Scheduled msg {sent.message_id} for deletion in {auto_delete_seconds}s")
         asyncio.create_task(_delete_later(sent, auto_delete_seconds))
     return sent
 
 
 async def _delete_later(msg: Message, delay: int):
+    logger.info(f"[AUTODELETE] Waiting {delay}s to delete msg {msg.message_id}")
     await asyncio.sleep(delay)
     try:
         await msg.delete()
-    except Exception:
-        pass
+        logger.info(f"[AUTODELETE] Deleted msg {msg.message_id}")
+    except Exception as e:
+        logger.error(f"[AUTODELETE] Failed to delete msg {msg.message_id}: {e}")
 
 game_data: Dict[int, dict] = {}
 cooldowns = {
