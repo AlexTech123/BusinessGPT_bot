@@ -1,7 +1,6 @@
 import os
 import logging
 import random
-import math
 import aiohttp
 import re
 import asyncio
@@ -32,6 +31,10 @@ USER_MAPPING = {
     924097351: "Александр Блок",
 }
 
+INITIAL_SIZES: Dict[int, float] = {
+    # user_id: size_cm — проставить вручную после рестарта
+}
+
 PERSONA_NAMES = list(USER_MAPPING.values())
 BOT_USERNAME = "business_textbot"
 MAX_MESSAGE_CHARS = 700
@@ -60,27 +63,33 @@ router = Router()
 
 game_data: Dict[int, dict] = {}
 GROW_COOLDOWN = 12 * 3600
-FIGHT_COOLDOWN = 5 * 60
+FIGHT_COOLDOWN = 10 * 60
 LOTTERY_COOLDOWN = 24 * 3600
+BUY_COOLDOWN = 6 * 3600
 last_lottery_global = 0.0
+
+SHOP_ITEMS = {
+    "condom": {"price_pct": 0.03, "desc": "потери в бою = 0"},
+    "viagra": {"price_pct": 0.03, "desc": "победа в бою: x2 забор"},
+    "lube": {"price_pct": 0.02, "desc": "grow не уйдёт в минус"},
+}
 
 
 def get_or_create_player(user_id: int, name: str) -> dict:
     if user_id not in game_data:
         game_data[user_id] = {
             "name": name,
-            "size": round(random.uniform(5.0, 15.0), 1),
-            "wins": 0,
-            "losses": 0,
+            "size": INITIAL_SIZES.get(user_id, round(random.uniform(5.0, 15.0), 1)),
             "last_grow": 0.0,
             "last_fight": 0.0,
+            "last_buy": 0.0,
+            "item": None,
         }
     return game_data[user_id]
 
 
-def make_dick_visual(size: float) -> str:
-    length = max(1, int(size / 3))
-    return "8" + "=" * length + "D"
+def dick_vis(size: float) -> str:
+    return "8" + "=" * max(1, int(size / 3)) + "D"
 
 session_stats: Dict[str, Any] = {
     "user_messages": {},
@@ -228,23 +237,12 @@ async def cmd_help(message: Message):
         return
 
     text = (
-        "📋 Commands:\n\n"
         "⚙️ Admin:\n"
-        "/threshold [0.0-1.0] — random response probability\n"
-        "/temperature [0.0-2.0] — model creativity\n"
-        "/context_window [1-30] — context size\n"
-        "/silent — заглушить/разглушить бота целиком\n"
-        "/status — current settings & state\n"
-        "/clear — clear context\n"
-        "/stats — session statistics\n"
-        "/help — this message\n\n"
-        "🍆 Growing Dick:\n"
-        "/dick — показать свой размер\n"
-        "/grow — попробовать вырастить (раз в 12ч)\n"
-        "/fight — дуэль (реплай, кулдаун 5м)\n"
-        "/gift [см] — подарить (реплай)\n"
-        "/lottery — лотерея (раз в 24ч, все скидываются)\n"
-        "/top — таблица лидеров"
+        "/threshold [0.0-1.0]\n"
+        "/temperature [0.0-2.0]\n"
+        "/context_window [1-30]\n"
+        "/silent — заглушить бота\n"
+        "/status /clear /stats"
     )
     await message.reply(text)
 
@@ -393,141 +391,144 @@ async def cmd_stats(message: Message):
     await message.reply("\n".join(lines))
 
 
+@router.message(Command("game"))
+async def cmd_game(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+    await message.reply(
+        "/dick — твой размер\n"
+        "/grow — вырастить (кд 12ч)\n"
+        "/fight — бой реплаем (кд 10м)\n"
+        "/fight 5 — бой со ставкой\n"
+        "/gift 3 — подарить (реплай)\n"
+        "/lottery — лотерея (кд 24ч)\n"
+        "/shop — магазин\n"
+        "/buy condom|viagra|lube (кд 6ч)\n"
+        "/top — рейтинг"
+    )
+
+
 @router.message(Command("dick"))
 async def cmd_dick(message: Message):
     if message.chat.id != ALLOWED_CHAT_ID:
         return
-
     user = message.from_user
-    name = USER_MAPPING.get(user.id, user.full_name)
-    player = get_or_create_player(user.id, name)
-
-    visual = make_dick_visual(player["size"])
-    await message.reply(
-        f"🍆 {player['name']}\n"
-        f"Размер: {player['size']} см\n"
-        f"{visual}\n"
-        f"Победы: {player['wins']} | Поражения: {player['losses']}"
-    )
+    p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
+    item_str = f" [{p['item']}]" if p["item"] else ""
+    await message.reply(f"🍆 {p['name']} — {p['size']} см {dick_vis(p['size'])}{item_str}")
 
 
 @router.message(Command("grow"))
 async def cmd_grow(message: Message):
     if message.chat.id != ALLOWED_CHAT_ID:
         return
-
     user = message.from_user
-    name = USER_MAPPING.get(user.id, user.full_name)
-    player = get_or_create_player(user.id, name)
+    p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
 
     now = time.time()
-    elapsed = now - player["last_grow"]
-    if elapsed < GROW_COOLDOWN:
-        remaining = GROW_COOLDOWN - elapsed
-        hours = int(remaining // 3600)
-        minutes = int((remaining % 3600) // 60)
-        await message.reply(f"⏳ Кулдаун! Попробуй через {hours}ч {minutes}м")
+    if now - p["last_grow"] < GROW_COOLDOWN:
+        rem = GROW_COOLDOWN - (now - p["last_grow"])
+        await message.reply(f"⏳ {int(rem // 3600)}ч {int((rem % 3600) // 60)}м")
         return
 
-    base = random.uniform(-3.0, 5.0)
+    base = p["size"] * random.uniform(-0.15, 0.25)
     multiplier = random.choice([0.5, 1.0, 1.0, 1.0, 1.5, 2.0])
     change = round(base * multiplier, 1)
 
-    old_size = player["size"]
-    player["size"] = max(1.0, round(old_size + change, 1))
-    player["last_grow"] = now
+    if p["item"] == "lube" and change < 0:
+        change = 0
+        p["item"] = None
 
-    actual_change = round(player["size"] - old_size, 1)
-    visual = make_dick_visual(player["size"])
+    old = p["size"]
+    p["size"] = max(1.0, round(old + change, 1))
+    p["last_grow"] = now
+    actual = round(p["size"] - old, 1)
 
-    if actual_change > 0:
-        emoji = "📈"
-        sign = "+"
-    elif actual_change < 0:
-        emoji = "📉"
-        sign = ""
-    else:
-        emoji = "😐"
-        sign = ""
+    if p["item"] == "lube":
+        p["item"] = None
 
+    sign = "+" if actual >= 0 else ""
+    emoji = "📈" if actual > 0 else ("📉" if actual < 0 else "😐")
     mult_str = f" (x{multiplier})" if multiplier != 1.0 else ""
-
-    await message.reply(
-        f"{emoji} {player['name']}\n"
-        f"Бросок: {sign}{actual_change} см{mult_str}\n"
-        f"Размер: {player['size']} см\n"
-        f"{visual}"
-    )
+    await message.reply(f"{emoji} {p['name']}: {sign}{actual}{mult_str} → {p['size']} см")
 
 
 @router.message(Command("fight"))
-async def cmd_fight(message: Message):
+async def cmd_fight(message: Message, command: CommandObject):
     if message.chat.id != ALLOWED_CHAT_ID:
         return
-
     user = message.from_user
-    attacker_name = USER_MAPPING.get(user.id, user.full_name)
-    attacker = get_or_create_player(user.id, attacker_name)
+    atk = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
 
     now = time.time()
-    elapsed = now - attacker["last_fight"]
-    if elapsed < FIGHT_COOLDOWN:
-        remaining = int(FIGHT_COOLDOWN - elapsed)
-        minutes = remaining // 60
-        seconds = remaining % 60
-        await message.reply(f"⏳ Кулдаун! Попробуй через {minutes}м {seconds}с")
+    if now - atk["last_fight"] < FIGHT_COOLDOWN:
+        rem = int(FIGHT_COOLDOWN - (now - atk["last_fight"]))
+        await message.reply(f"⏳ {rem // 60}м {rem % 60}с")
         return
 
     if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply("⚔️ Реплайни на сообщение соперника!")
+        await message.reply("⚔️ Реплайни на соперника")
         return
-
     opp = message.reply_to_message.from_user
     if opp.is_bot:
-        await message.reply("🤖 С ботом драться нельзя!")
+        await message.reply("⚔️ С ботом нельзя")
+        return
+    if opp.id == user.id:
+        await message.reply("⚔️ Нельзя с собой")
         return
 
-    opponent_id = opp.id
-    opponent_name = USER_MAPPING.get(opp.id, opp.full_name)
+    dfn = get_or_create_player(opp.id, USER_MAPPING.get(opp.id, opp.full_name))
 
-    if opponent_id == user.id:
-        await message.reply("🤦 Нельзя драться с самим собой!")
-        return
+    bet = None
+    if command.args:
+        try:
+            bet = round(float(command.args.replace(",", ".")), 1)
+            max_bet = min(dfn["size"] * 0.25, atk["size"] - 1.0)
+            max_bet = max(0.1, round(max_bet, 1))
+            if bet <= 0 or bet > max_bet:
+                await message.reply(f"⚔️ Ставка 0.1—{max_bet}")
+                return
+        except ValueError:
+            await message.reply("⚔️ /fight или /fight 5")
+            return
 
-    defender = get_or_create_player(opponent_id, opponent_name)
-
-    atk_roll = round(random.uniform(0, 100), 1)
-    def_roll = round(random.uniform(0, 100), 1)
-    atk_bonus = round(math.log2(max(attacker["size"], 1)) * 5, 1)
-    def_bonus = round(math.log2(max(defender["size"], 1)) * 5, 1)
-    atk_power = round(atk_roll + atk_bonus, 1)
-    def_power = round(def_roll + def_bonus, 1)
-
-    transfer = round(random.uniform(1.0, 3.0), 1)
+    atk_power = random.uniform(0, 100) + min(atk["size"] * 0.5, 15)
+    def_power = random.uniform(0, 100) + min(dfn["size"] * 0.5, 15)
 
     if atk_power >= def_power:
-        winner, loser = attacker, defender
-        winner_label, loser_label = attacker["name"], defender["name"]
+        winner, loser = atk, dfn
     else:
-        winner, loser = defender, attacker
-        winner_label, loser_label = defender["name"], attacker["name"]
+        winner, loser = dfn, atk
+
+    if bet:
+        transfer = bet
+    else:
+        transfer = max(0.5, round(loser["size"] * random.uniform(0.1, 0.25), 1))
+
+    if winner["item"] == "viagra":
+        transfer = min(round(transfer * 2, 1), round(loser["size"] * 0.3, 1))
+        winner["item"] = None
+    elif winner["item"] in ("condom", "lube"):
+        winner["item"] = None
+
+    if loser["item"] == "condom":
+        transfer = 0
+        loser["item"] = None
+    elif loser["item"] in ("viagra", "lube"):
+        loser["item"] = None
 
     loser_old = loser["size"]
     loser["size"] = max(1.0, round(loser["size"] - transfer, 1))
-    actual_loss = round(loser_old - loser["size"], 1)
-    winner["size"] = round(winner["size"] + actual_loss, 1)
+    actual = round(loser_old - loser["size"], 1)
+    winner["size"] = round(winner["size"] + actual, 1)
+    atk["last_fight"] = now
 
-    winner["wins"] += 1
-    loser["losses"] += 1
-    attacker["last_fight"] = now
-
+    bet_str = f" ({bet})" if bet else ""
     await message.reply(
-        f"⚔️ {attacker['name']} 🎲{atk_roll}+{atk_bonus}={atk_power}\n"
-        f"⚔️ {defender['name']} 🎲{def_roll}+{def_bonus}={def_power}\n\n"
-        f"🏆 Победил {winner_label}!\n"
-        f"  +{actual_loss} см → {winner['size']} см {make_dick_visual(winner['size'])}\n"
-        f"😢 Проиграл {loser_label}:\n"
-        f"  -{actual_loss} см → {loser['size']} см {make_dick_visual(loser['size'])}"
+        f"⚔️ {atk['name']} vs {dfn['name']}{bet_str}\n"
+        f"🏆 Победил {winner['name']}!\n"
+        f"{winner['name']} +{actual} → {winner['size']}\n"
+        f"{loser['name']} -{actual} → {loser['size']}"
     )
 
 
@@ -535,55 +536,33 @@ async def cmd_fight(message: Message):
 async def cmd_gift(message: Message, command: CommandObject):
     if message.chat.id != ALLOWED_CHAT_ID:
         return
-
     user = message.from_user
-    name = USER_MAPPING.get(user.id, user.full_name)
-    player = get_or_create_player(user.id, name)
+    p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
 
     if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply("🎁 Реплайни на сообщение получателя: /gift 3")
+        await message.reply("🎁 Реплайни: /gift 3")
         return
-
     opp = message.reply_to_message.from_user
-    if opp.is_bot:
-        await message.reply("🤖 Боту дарить нельзя!")
+    if opp.is_bot or opp.id == user.id:
         return
-
-    if opp.id == user.id:
-        await message.reply("🤦 Нельзя дарить самому себе!")
-        return
-
     if not command.args:
-        await message.reply("🎁 Напиши сколько дарить: /gift 3")
+        await message.reply("🎁 /gift 3")
         return
-
     try:
         amount = round(float(command.args.replace(",", ".")), 1)
     except ValueError:
-        await message.reply("❌ Напиши число: /gift 3")
         return
-
     if amount <= 0:
-        await message.reply("❌ Количество должно быть больше 0")
         return
-
-    max_gift = round(player["size"] - 1.0, 1)
+    max_gift = round(p["size"] - 1.0, 1)
     if amount > max_gift:
-        await message.reply(f"❌ Максимум: {max_gift} см (минимум 1.0 см остаётся)")
+        await message.reply(f"🎁 Макс: {max_gift}")
         return
 
-    recipient_name = USER_MAPPING.get(opp.id, opp.full_name)
-    recipient = get_or_create_player(opp.id, recipient_name)
-
-    player["size"] = round(player["size"] - amount, 1)
-    recipient["size"] = round(recipient["size"] + amount, 1)
-
-    await message.reply(
-        f"🎁 {player['name']} → {recipient['name']}\n"
-        f"Передано: {amount} см\n\n"
-        f"{player['name']}: {player['size']} см {make_dick_visual(player['size'])}\n"
-        f"{recipient['name']}: {recipient['size']} см {make_dick_visual(recipient['size'])}"
-    )
+    r = get_or_create_player(opp.id, USER_MAPPING.get(opp.id, opp.full_name))
+    p["size"] = round(p["size"] - amount, 1)
+    r["size"] = round(r["size"] + amount, 1)
+    await message.reply(f"🎁 {p['name']} → {r['name']}: {amount} см")
 
 
 @router.message(Command("lottery"))
@@ -591,73 +570,103 @@ async def cmd_lottery(message: Message):
     global last_lottery_global
     if message.chat.id != ALLOWED_CHAT_ID:
         return
-
     if len(game_data) < 2:
-        await message.reply("🎰 Нужно минимум 2 игрока! Пусть все напишут /dick")
+        await message.reply("🎰 Нужно 2+ игрока")
         return
 
     now = time.time()
-    elapsed = now - last_lottery_global
-    if elapsed < LOTTERY_COOLDOWN:
-        remaining = LOTTERY_COOLDOWN - elapsed
-        hours = int(remaining // 3600)
-        minutes = int((remaining % 3600) // 60)
-        await message.reply(f"⏳ Лотерея уже была! Следующая через {hours}ч {minutes}м")
+    if now - last_lottery_global < LOTTERY_COOLDOWN:
+        rem = LOTTERY_COOLDOWN - (now - last_lottery_global)
+        await message.reply(f"⏳ {int(rem // 3600)}ч {int((rem % 3600) // 60)}м")
         return
 
     last_lottery_global = now
-
-    entry_fee = 1.0
     pot = 0.0
-    contributors = []
-
-    for uid, p in game_data.items():
+    for p in game_data.values():
         if p["size"] > 1.0:
-            take = min(entry_fee, round(p["size"] - 1.0, 1))
+            take = round(p["size"] * 0.05, 1)
+            take = min(take, round(p["size"] - 1.0, 1))
             p["size"] = round(p["size"] - take, 1)
             pot = round(pot + take, 1)
-            contributors.append(p["name"])
 
     if pot == 0:
-        await message.reply("🎰 Ни у кого нет лишних см для взноса!")
         return
 
-    winner_id = random.choice(list(game_data.keys()))
-    winner = game_data[winner_id]
-    winner["size"] = round(winner["size"] + pot, 1)
+    w = game_data[random.choice(list(game_data.keys()))]
+    w["size"] = round(w["size"] + pot, 1)
+    await message.reply(
+        f"🎰 Банк: {pot} см\n"
+        f"🏆 {w['name']} +{pot} → {w['size']} см"
+    )
 
-    lines = [
-        f"🎰 ЛОТЕРЕЯ!\n",
-        f"Взнос: {entry_fee} см с каждого",
-        f"Участники: {len(contributors)}",
-        f"Банк: {pot} см\n",
-        f"🏆 Победитель: {winner['name']}!",
-        f"  +{pot} см → {winner['size']} см {make_dick_visual(winner['size'])}",
-    ]
+
+@router.message(Command("shop"))
+async def cmd_shop(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+    user = message.from_user
+    p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
+
+    lines = ["🛒 Магазин:\n"]
+    for name, info in SHOP_ITEMS.items():
+        price = max(0.1, round(p["size"] * info["price_pct"], 1))
+        lines.append(f"  {name} ({price} см) — {info['desc']}")
+    if p["item"]:
+        lines.append(f"\n🎒 Активный: {p['item']}")
+    now = time.time()
+    if now - p["last_buy"] < BUY_COOLDOWN:
+        rem = BUY_COOLDOWN - (now - p["last_buy"])
+        lines.append(f"⏳ Покупка через {int(rem // 3600)}ч {int((rem % 3600) // 60)}м")
     await message.reply("\n".join(lines))
+
+
+@router.message(Command("buy"))
+async def cmd_buy(message: Message, command: CommandObject):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+    user = message.from_user
+    p = get_or_create_player(user.id, USER_MAPPING.get(user.id, user.full_name))
+
+    if not command.args or command.args.strip().lower() not in SHOP_ITEMS:
+        await message.reply("🛒 /buy condom|viagra|lube")
+        return
+    if p["item"]:
+        await message.reply(f"🛒 Уже есть: {p['item']}")
+        return
+
+    now = time.time()
+    if now - p["last_buy"] < BUY_COOLDOWN:
+        rem = BUY_COOLDOWN - (now - p["last_buy"])
+        await message.reply(f"⏳ {int(rem // 3600)}ч {int((rem % 3600) // 60)}м")
+        return
+
+    item_name = command.args.strip().lower()
+    price = max(0.1, round(p["size"] * SHOP_ITEMS[item_name]["price_pct"], 1))
+
+    if p["size"] - price < 1.0:
+        await message.reply("🛒 Не хватает см")
+        return
+
+    p["size"] = round(p["size"] - price, 1)
+    p["item"] = item_name
+    p["last_buy"] = now
+    await message.reply(f"🛒 {p['name']}: {item_name} (-{price} см)")
 
 
 @router.message(Command("top"))
 async def cmd_top(message: Message):
     if message.chat.id != ALLOWED_CHAT_ID:
         return
-
     if not game_data:
-        await message.reply("🏆 Ещё никто не играет! Напиши /dick чтобы начать")
+        await message.reply("🏆 /dick чтобы начать")
         return
 
-    sorted_players = sorted(game_data.values(), key=lambda p: p["size"], reverse=True)
-
+    sorted_p = sorted(game_data.values(), key=lambda x: x["size"], reverse=True)
     medals = ["🥇", "🥈", "🥉"]
-    lines = ["🏆 Топ игроков:\n"]
-    for i, p in enumerate(sorted_players):
-        medal = medals[i] if i < 3 else f"{i + 1}."
-        lines.append(
-            f"{medal} {p['name']} — {p['size']} см "
-            f"{make_dick_visual(p['size'])} "
-            f"({p['wins']}W/{p['losses']}L)"
-        )
-
+    lines = []
+    for i, p in enumerate(sorted_p):
+        m = medals[i] if i < 3 else f"{i + 1}."
+        lines.append(f"{m} {p['name']} — {p['size']} {dick_vis(p['size'])}")
     await message.reply("\n".join(lines))
 
 
