@@ -66,19 +66,19 @@ router = Router()
 async def reply_game(message: Message, text: str):
     sent = await message.reply(text, disable_notification=True)
     if auto_delete_seconds > 0:
-        logger.info(f"[AUTODELETE] Scheduled msg {sent.message_id} for deletion in {auto_delete_seconds}s")
-        asyncio.create_task(_delete_later(sent, auto_delete_seconds))
+        logger.info(f"[AUTODELETE] Scheduled bot={sent.message_id} user={message.message_id} in {auto_delete_seconds}s")
+        asyncio.create_task(_delete_later(sent, message, auto_delete_seconds))
     return sent
 
 
-async def _delete_later(msg: Message, delay: int):
-    logger.info(f"[AUTODELETE] Waiting {delay}s to delete msg {msg.message_id}")
+async def _delete_later(bot_msg: Message, user_msg: Message, delay: int):
     await asyncio.sleep(delay)
-    try:
-        await msg.delete()
-        logger.info(f"[AUTODELETE] Deleted msg {msg.message_id}")
-    except Exception as e:
-        logger.error(f"[AUTODELETE] Failed to delete msg {msg.message_id}: {e}")
+    for tag, msg in [("bot", bot_msg), ("user", user_msg)]:
+        try:
+            await msg.delete()
+            logger.info(f"[AUTODELETE] Deleted {tag}={msg.message_id}")
+        except Exception as e:
+            logger.error(f"[AUTODELETE] Failed {tag}={msg.message_id}: {e}")
 
 game_data: Dict[int, dict] = {}
 cooldowns = {
@@ -145,14 +145,14 @@ FIGHT_CHALLENGE = [
     "{a} решил помериться с {d}!",
 ]
 FIGHT_WIN = [
-    "{w} победил и забрал {t} см ⚔️",
-    "{w} выиграл и отжал {t} см ⚔️",
-    "Победа за {w}! +{t} см ⚔️",
-    "{w} оказался сильнее! +{t} см ⚔️",
-    "{w} доминирует! +{t} см ⚔️",
-    "{w} унизил соперника! +{t} см ⚔️",
-    "{w} забрал {t} см себе ⚔️",
-    "{w} отобрал {t} см ⚔️",
+    "{w} победил и забрал {t} см 💥",
+    "{w} выиграл и отжал {t} см 💥",
+    "Победа за {w}! +{t} см 💪",
+    "{w} оказался сильнее! +{t} см 💪",
+    "{w} доминирует! +{t} см 🔥",
+    "{w} унизил соперника! +{t} см 🔥",
+    "{w} забрал {t} см себе 💥",
+    "{w} отобрал {t} см 👊",
 ]
 FIGHT_CONDOM = [
     "{l} надел кондом — потери 0! 🛡️",
@@ -682,14 +682,14 @@ async def cmd_fight(message: Message, command: CommandObject):
         return
 
     if not message.reply_to_message or not message.reply_to_message.from_user:
-        await reply_game(message, "Реплайни на соперника ⚔️")
+        await reply_game(message, "Реплайни на соперника 👊")
         return
     opp = message.reply_to_message.from_user
     if opp.is_bot:
-        await reply_game(message, "С ботом нельзя драться ⚔️")
+        await reply_game(message, "С ботом нельзя драться 🤖")
         return
     if opp.id == user.id:
-        await reply_game(message, "Нельзя драться с собой ⚔️")
+        await reply_game(message, "Нельзя драться с собой 🤦")
         return
 
     dfn = get_or_create_player(opp.id, USER_MAPPING.get(opp.id, opp.full_name))
@@ -701,10 +701,10 @@ async def cmd_fight(message: Message, command: CommandObject):
             max_bet = min(dfn["size"] * 0.25, atk["size"] - 1.0)
             max_bet = max(0.1, round(max_bet, 1))
             if bet <= 0 or bet > max_bet:
-                await reply_game(message, f"Ставка от 0.1 до {max_bet} ⚔️")
+                await reply_game(message, f"Ставка от 0.1 до {max_bet} 💰")
                 return
         except ValueError:
-            await reply_game(message, "/fight или /fight 5 ⚔️")
+            await reply_game(message, "/fight или /fight 5 👊")
             return
 
     atk_power = random.uniform(0, 100) + min(atk["size"] * 0.5, 15)
@@ -743,15 +743,16 @@ async def cmd_fight(message: Message, command: CommandObject):
     winner["size"] = round(winner["size"] + actual, 1)
     atk["last_fight"] = now
 
-    bet_str = f" (ставка {bet})" if bet else ""
-    line1 = random.choice(FIGHT_CHALLENGE).format(a=atk["name"], d=dfn["name"]) + bet_str
-    line2 = random.choice(FIGHT_WIN).format(w=winner["name"], t=actual)
-    lines = [line1, line2]
+    lines = [random.choice(FIGHT_CHALLENGE).format(a=atk["name"], d=dfn["name"])]
+    if bet:
+        lines.append(f"Ставка: {bet} см 💰")
+    lines.append(random.choice(FIGHT_WIN).format(w=winner["name"], t=actual))
     if condom_used:
         lines.append(random.choice(FIGHT_CONDOM).format(l=loser["name"]))
     if viagra_used:
         lines.append(random.choice(FIGHT_VIAGRA).format(w=winner["name"]))
-    lines.append(f"{winner['name']} {winner['size']} см | {loser['name']} {loser['size']} см")
+    lines.append(f"📊 {winner['name']} → {winner['size']} см")
+    lines.append(f"📊 {loser['name']} → {loser['size']} см")
     await reply_game(message, "\n".join(lines))
 
 
