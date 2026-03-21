@@ -44,15 +44,15 @@ GAME_CASES: Dict[int, dict] = {
 }
 
 INITIAL_SIZES: Dict[int, float] = {
-    407221863: 22.8,   # Некит
-    1035739386: 16.1,  # Крюк
-    485898893: 15.4,   # Мельник
-    1878550901: 12.7,  # Егориус
-    1313515064: 10.9,  # Булгак
-    1214336850: 10.7,  # Череп
-    814759080: 7.9,    # Зитракс
-    924097351: 5.3,    # Краб
-    460174637: 3.9,    # Влад
+    407221863: 27.1,   # Некит
+    1035739386: 17.3,  # Крюк
+    485898893: 7.3,   # Мельник
+    1878550901: 13.9,  # Егориус
+    1313515064: 25.3,  # Булгак
+    1214336850: 13.1,  # Череп
+    814759080: 9.8,    # Зитракс
+    924097351: 15.2,    # Краб
+    460174637: 12.6,    # Влад
 }
 
 PERSONA_NAMES = list(USER_MAPPING.values())
@@ -128,8 +128,8 @@ async def _delete_later(bot_msg: Message, user_msg: Message, delay: int):
 game_data: Dict[int, dict] = {}
 cooldowns = {
     "grow": 12 * 3600,
-    "fight": 10 * 60,
-    "lottery": 24 * 3600,
+    "fight": 5 * 60,
+    "lottery": 12 * 3600,
     "buy": 3600,
 }
 last_lottery_global = 0.0
@@ -404,12 +404,15 @@ def check_event(player: dict) -> str | None:
         if delta == "shuffle":
             sizes = [p["size"] for p in game_data.values()]
             random.shuffle(sizes)
-            for p, s in zip(game_data.values(), sizes):
-                p["size"] = max(1.0, round(s, 1))
+            for p, new_s in zip(game_data.values(), sizes):
+                old = p["size"]
+                p["size"] = max(1.0, round(new_s, 1))
+                add_log(p, "⚡шафл", round(p["size"] - old, 1), p["size"])
             return f"⚡ {text}"
         for p in game_data.values():
             old = p["size"]
             p["size"] = max(1.0, round(old + delta, 1))
+            add_log(p, "⚡ивент", round(p["size"] - old, 1), p["size"])
         sign = "+" if delta > 0 else ""
         return f"⚡ {text} {sign}{delta} см каждому"
 
@@ -418,10 +421,14 @@ def check_event(player: dict) -> str | None:
         old = player["size"]
         player["size"] = max(1.0, round(old + delta, 1))
         actual = round(player["size"] - old, 1)
+        add_log(player, "⚡личн", actual, player["size"])
         sign = "+" if actual > 0 else ""
         return f"⚡ {text.format(**pf(player))} {sign}{actual} → {player['size']} см"
 
     return None
+
+
+MAX_LOG = 10
 
 
 def get_or_create_player(user_id: int, name: str) -> dict:
@@ -437,8 +444,16 @@ def get_or_create_player(user_id: int, name: str) -> dict:
             "last_fight": 0.0,
             "last_buy": 0.0,
             "item": None,
+            "log": [],
         }
     return game_data[user_id]
+
+
+def add_log(player: dict, tag: str, delta: float, new_size: float):
+    sign = "+" if delta > 0 else ""
+    player.setdefault("log", []).append(f"{tag} {sign}{delta} → {new_size}")
+    if len(player["log"]) > MAX_LOG:
+        player["log"] = player["log"][-MAX_LOG:]
 
 
 session_stats: Dict[str, Any] = {
@@ -784,6 +799,7 @@ async def cmd_setsize(message: Message, command: CommandObject):
     p = get_or_create_player(target.id, USER_MAPPING.get(target.id, target.full_name))
     old = p["size"]
     p["size"] = value
+    add_log(p, "🔧admin", round(value - old, 1), value)
     await reply_admin(message, f"✅ {p['name']}: {old} → {value} см")
 
 
@@ -853,6 +869,7 @@ async def cmd_game(message: Message):
         f"/lottery — лотерея (кд {fmt_cd(cooldowns['lottery'])})\n"
         f"/shop — магазин\n"
         f"/buy condom|viagra|lube (кд {fmt_cd(cooldowns['buy'])})\n"
+        f"/log — история (реплай/имя)\n"
         f"/top — рейтинг"
     )
 
@@ -880,7 +897,7 @@ async def cmd_grow(message: Message):
         await reply_game(message, f"Подожди ещё {int(rem // 3600)}ч {int((rem % 3600) // 60)}м ⏳")
         return
 
-    base = p["size"] * random.uniform(-0.15, 0.25)
+    base = p["size"] * random.uniform(-0.15, 0.35)
     multiplier = random.choice([0.5, 1.0, 1.0, 1.0, 1.5, 2.0])
     change = round(base * multiplier, 1)
 
@@ -897,6 +914,10 @@ async def cmd_grow(message: Message):
 
     if p["item"] == "lube":
         p["item"] = None
+
+    if actual != 0 or lube_used:
+        tag = "🧴grow" if lube_used else "🌱grow"
+        add_log(p, tag, actual, p["size"])
 
     s = p["size"]
     if lube_used:
@@ -1009,6 +1030,9 @@ async def cmd_fight(message: Message, command: CommandObject):
     winner["size"] = round(winner["size"] + actual, 1)
     atk["last_fight"] = now
 
+    add_log(winner, f"⚔️победил {loser['name_r']}", actual, winner["size"])
+    add_log(loser, f"⚔️проиграл {winner['name_d']}", -actual, loser["size"])
+
     lines = [random.choice(FIGHT_CHALLENGE).format(**pf(atk, "a"), **pf(dfn, "d"))]
     if bet:
         lines.append(f"Ставка: {bet} см 💰")
@@ -1055,6 +1079,8 @@ async def cmd_gift(message: Message, command: CommandObject):
     r = get_or_create_player(opp.id, game_name(opp))
     p["size"] = round(p["size"] - amount, 1)
     r["size"] = round(r["size"] + amount, 1)
+    add_log(p, f"🎁→{r['name']}", -amount, p["size"])
+    add_log(r, f"🎁←{p['name']}", amount, r["size"])
     text = random.choice(GIFT_PHRASES).format(**pf(p, "g"), **pf(r, "r"), a=amount)
     await reply_game(message, text)
 
@@ -1082,12 +1108,14 @@ async def cmd_lottery(message: Message):
             take = min(take, round(p["size"] - 1.0, 1))
             p["size"] = round(p["size"] - take, 1)
             pot = round(pot + take, 1)
+            add_log(p, "🎰лот", -take, p["size"])
 
     if pot == 0:
         return
 
     w = game_data[random.choice(list(game_data.keys()))]
     w["size"] = round(w["size"] + pot, 1)
+    add_log(w, "🎰выигр", pot, w["size"])
     line2 = random.choice(LOTTERY_WIN).format(**pf(w, "w"), s=w["size"])
     await reply_game(message, f"Лотерея! Банк: {pot} см\n{line2}")
 
@@ -1146,7 +1174,44 @@ async def cmd_buy(message: Message, command: CommandObject):
     p["size"] = round(p["size"] - price, 1)
     p["item"] = item_name
     p["last_buy"] = now
+    add_log(p, f"🛒{item_name}", -price, p["size"])
     await reply_game(message, f"{p['name']} купил {item_name} за {price} см ✅")
+
+
+@router.message(Command("log"))
+async def cmd_log(message: Message, command: CommandObject):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+    user = message.from_user
+    target = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        opp = message.reply_to_message.from_user
+        if opp.id in game_data:
+            target = (opp.id, game_data[opp.id])
+    elif command.args:
+        q = command.args.strip().lower()
+        for uid, p in game_data.items():
+            if p["name"].lower() == q:
+                target = (uid, p)
+                break
+    else:
+        if user.id in game_data:
+            target = (user.id, game_data[user.id])
+
+    if not target:
+        await reply_game(message, "Игрок не найден 📋")
+        return
+
+    uid, p = target
+    log = p.get("log", [])
+    if not log:
+        await reply_game(message, f"{p['name']} — пока пусто 📋")
+        return
+
+    header = f"📋 {p['name']} ({p['size']} см)"
+    lines = [header] + log[-MAX_LOG:]
+    await reply_game(message, "\n".join(lines))
 
 
 @router.message(Command("top"))
